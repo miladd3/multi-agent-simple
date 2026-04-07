@@ -9,6 +9,10 @@ from agents.mcp import MCPServerStreamableHttp
 from dotenv import load_dotenv
 from openai.types.responses import ResponseTextDeltaEvent
 
+from tracing import setup_tracing
+
+setup_tracing()
+
 
 LIMIT_AGENT_INSTRUCTIONS = """You are a debit card limit management assistant.
 You help users view and change their card limits (POS, ATM, E-commerce).

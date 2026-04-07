@@ -8,6 +8,8 @@ dependencies = [
   "openai-agents",
   "python-dotenv",
   "uvicorn",
+  "arize-phoenix-otel",
+  "openinference-instrumentation-openai-agents",
 ]
 
 [tool.uv]
