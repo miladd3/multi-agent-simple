@@ -1,0 +1,4 @@
+python-dotenv
+openai-agents
+starlette
+uvicorn
