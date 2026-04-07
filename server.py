@@ -4,11 +4,10 @@ import json
 from typing import AsyncIterator
 
 import uvicorn
-from starlette.applications import Starlette
-from starlette.middleware.cors import CORSMiddleware
-from starlette.requests import Request
-from starlette.responses import JSONResponse, PlainTextResponse, StreamingResponse
-from starlette.routing import Route
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import PlainTextResponse, StreamingResponse
+from pydantic import BaseModel
 
 from provider import MultiAgentProvider
 
@@ -16,17 +15,38 @@ from provider import MultiAgentProvider
 provider = MultiAgentProvider()
 
 
-async def healthcheck(_: Request) -> JSONResponse:
-    return JSONResponse({"ok": True})
+class StreamChatRequest(BaseModel):
+    message: str
+    conversationId: str | None = None
 
 
-async def stream_chat(request: Request) -> StreamingResponse | JSONResponse:
-    payload = await request.json()
-    message = str(payload.get("message", "")).strip()
-    conversation_id = payload.get("conversationId")
+app = FastAPI(title="Multi-Agent Chat API", version="0.1.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.get("/health")
+async def healthcheck() -> dict[str, bool]:
+    return {"ok": True}
+
+
+@app.get("/", response_class=PlainTextResponse)
+async def homepage() -> str:
+    return "Multi-agent chat API is running."
+
+
+@app.post("/api/chat/stream")
+async def stream_chat(payload: StreamChatRequest) -> StreamingResponse:
+    message = payload.message.strip()
+    conversation_id = payload.conversationId
 
     if not message:
-        return JSONResponse({"error": "Message is required."}, status_code=400)
+        raise HTTPException(status_code=400, detail="Message is required.")
 
     async def generate() -> AsyncIterator[str]:
         try:
@@ -43,27 +63,6 @@ async def stream_chat(request: Request) -> StreamingResponse | JSONResponse:
             "X-Accel-Buffering": "no",
         },
     )
-
-
-async def homepage(_: Request) -> PlainTextResponse:
-    return PlainTextResponse("Multi-agent chat API is running.")
-
-
-app = Starlette(
-    debug=True,
-    routes=[
-        Route("/", homepage),
-        Route("/health", healthcheck),
-        Route("/api/chat/stream", stream_chat, methods=["POST"]),
-    ],
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 
 if __name__ == "__main__":

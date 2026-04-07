@@ -171,6 +171,6 @@ class MultiAgentProvider:
     @staticmethod
     def _describe_tool_call(item: Any) -> str:
         if isinstance(item, ToolCallItem):
-          name = getattr(item.raw_item, "name", None) or item.title or item.description or "tool"
-          return f"{name} was called."
+            name = getattr(item.raw_item, "name", None) or item.title or item.description or "tool"
+            return f"{name} was called."
         return "A tool call was executed."
