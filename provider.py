@@ -1,15 +1,13 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
 from typing import Any, AsyncIterator
 from uuid import uuid4
 
-from agents import Agent, Runner, SQLiteSession, gen_trace_id, trace
-from agents.items import HandoffCallItem, ToolCallItem
+from agents import Agent, ItemHelpers, Runner, SQLiteSession, gen_trace_id, trace
 from agents.mcp import MCPServerStreamableHttp
-from agents.stream_events import AgentUpdatedStreamEvent, RawResponsesStreamEvent, RunItemStreamEvent
 from dotenv import load_dotenv
+from openai.types.responses import ResponseTextDeltaEvent
 
 
 LIMIT_AGENT_INSTRUCTIONS = """You are a debit card limit management assistant.
@@ -55,64 +53,46 @@ Rules:
 - If the user says goodbye, respond with a friendly farewell.
 """
 
-
-@dataclass(slots=True)
-class ProviderConfig:
-    model: str
-    mcp_server_url: str
+SESSIONS_DB = "sessions.db"
 
 
 class MultiAgentProvider:
     def __init__(self) -> None:
         load_dotenv()
-        os.environ["OPENAI_API_KEY"] = os.environ["OPENAI_API_KEY"]
-        self.config = ProviderConfig(
-            model=os.getenv("OPENAI_MODEL", "gpt-4.1"),
-            mcp_server_url=os.getenv("MCP_SERVER_URL", "http://127.0.0.1:2009/mcp"),
-        )
-        self._sessions: dict[str, SQLiteSession] = {}
-
-    def _get_session(self, conversation_id: str | None) -> tuple[str, SQLiteSession]:
-        session_id = conversation_id or f"multi-agent-{uuid4()}"
-        session = self._sessions.get(session_id)
-        if session is None:
-            session = SQLiteSession(session_id=session_id)
-            self._sessions[session_id] = session
-        return session_id, session
+        self.model = os.getenv("OPENAI_MODEL", "gpt-4.1")
+        self.mcp_url = os.getenv("MCP_SERVER_URL", "http://127.0.0.1:2009/mcp")
 
     def _build_supervisor(self, mcp_server: MCPServerStreamableHttp) -> Agent[Any]:
         limit_agent = Agent(
             name="Limit Agent",
             handoff_description="Handles viewing, changing, or managing card limits (POS, ATM, E-commerce). Use when the user wants to see their current limits or make changes.",
             instructions=LIMIT_AGENT_INSTRUCTIONS,
-            model=self.config.model,
+            model=self.model,
             mcp_servers=[mcp_server],
         )
-
         faq_agent = Agent(
             name="FAQ Agent",
             handoff_description="Shares interesting facts and answers questions about ABN AMRO — its history, services, Tikkie, sustainability, and more. Use when the user asks about the bank itself.",
             instructions=FAQ_AGENT_INSTRUCTIONS,
-            model=self.config.model,
+            model=self.model,
         )
-
         return Agent(
             name="Supervisor",
             instructions=SUPERVISOR_INSTRUCTIONS,
-            model=self.config.model,
+            model=self.model,
             handoffs=[limit_agent, faq_agent],
         )
 
     async def stream_turn(
         self, user_message: str, conversation_id: str | None = None
     ) -> AsyncIterator[dict[str, Any]]:
-        session_id, session = self._get_session(conversation_id)
+        session_id = conversation_id or f"multi-agent-{uuid4()}"
+        session = SQLiteSession(session_id, SESSIONS_DB)
         trace_id = gen_trace_id()
 
         async with MCPServerStreamableHttp(
             name="card_limit_manager",
-            params={"url": self.config.mcp_server_url, "timeout": 15, "sse_read_timeout": 300},
-            require_approval="never",
+            params={"url": self.mcp_url, "timeout": 15, "sse_read_timeout": 300},
             cache_tools_list=True,
         ) as mcp_server:
             supervisor = self._build_supervisor(mcp_server)
@@ -122,55 +102,25 @@ class MultiAgentProvider:
                 yield {"type": "conversation", "conversationId": session_id}
 
                 async for event in stream_result.stream_events():
-                    if isinstance(event, AgentUpdatedStreamEvent):
+                    if event.type == "raw_response_event":
+                        if isinstance(event.data, ResponseTextDeltaEvent):
+                            yield {"type": "delta", "delta": event.data.delta}
+                    elif event.type == "agent_updated_stream_event":
                         yield {"type": "agent", "agentName": event.new_agent.name}
-                        continue
+                    elif event.type == "run_item_stream_event":
+                        item = event.item
+                        if item.type == "tool_call_item":
+                            yield {"type": "tool_call", "name": getattr(item.raw_item, "name", "tool")}
+                        elif item.type == "tool_call_output_item":
+                            yield {"type": "tool_output", "output": str(item.output)}
+                        elif item.type == "handoff_call_item":
+                            yield {"type": "handoff", "target": getattr(item.raw_item, "name", "specialist")}
+                        elif item.type == "message_output_item":
+                            yield {"type": "message", "text": ItemHelpers.text_message_output(item)}
 
-                    if not isinstance(event, RunItemStreamEvent | RawResponsesStreamEvent):
-                        continue
-
-                    if isinstance(event, RawResponsesStreamEvent):
-                        delta = self._extract_text_delta(event.data)
-                        if delta:
-                            yield {"type": "delta", "delta": delta}
-                        continue
-
-                    if event.name in {"handoff_requested", "handoff_occured"}:
-                        detail = self._describe_handoff(event.item)
-                        yield {"type": "handoff", "detail": detail}
-                        continue
-
-                    if event.name == "tool_called":
-                        detail = self._describe_tool_call(event.item)
-                        yield {"type": "tool", "toolName": detail, "detail": detail}
-
-                output = str(stream_result.final_output or "").strip()
-                last_agent = stream_result.last_agent.name if stream_result.last_agent else "Supervisor"
                 yield {
                     "type": "done",
-                    "conversationId": session_id,
-                    "output": output,
-                    "agentName": last_agent,
+                    "output": str(stream_result.final_output or "").strip(),
+                    "agentName": stream_result.last_agent.name if stream_result.last_agent else "Supervisor",
                     "traceId": trace_id,
                 }
-
-    @staticmethod
-    def _extract_text_delta(data: Any) -> str | None:
-        event_type = getattr(data, "type", None)
-        if event_type == "response.output_text.delta":
-            return getattr(data, "delta", None)
-        return None
-
-    @staticmethod
-    def _describe_handoff(item: Any) -> str:
-        if isinstance(item, HandoffCallItem):
-            target = getattr(item.raw_item, "name", None) or "specialist"
-            return f"Supervisor initiated a handoff to {target}."
-        return "A specialist handoff was requested."
-
-    @staticmethod
-    def _describe_tool_call(item: Any) -> str:
-        if isinstance(item, ToolCallItem):
-            name = getattr(item.raw_item, "name", None) or item.title or item.description or "tool"
-            return f"{name} was called."
-        return "A tool call was executed."

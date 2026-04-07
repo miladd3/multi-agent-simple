@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Streaming multi-agent demo with FastAPI and OpenAI Agents"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-  "fastapi>=0.111,<1",
+  "fastapi",
   "openai-agents",
   "python-dotenv",
   "uvicorn",
