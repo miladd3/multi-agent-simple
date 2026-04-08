@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 import asyncio
-from provider import MultiAgentProvider
+from provider import stream_turn
 
 
 async def main() -> None:
-    provider = MultiAgentProvider()
     conversation_id: str | None = None
 
     print("Multi-Agent Card Limit System")
@@ -24,7 +23,7 @@ async def main() -> None:
         trace_id = ""
 
         try:
-            async for chunk in provider.stream_turn(user_message, conversation_id):
+            async for chunk in stream_turn(user_message, conversation_id):
                 if chunk["type"] == "conversation":
                     conversation_id = chunk["conversationId"]
                 elif chunk["type"] == "agent":

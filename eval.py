@@ -17,7 +17,7 @@ import os
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from provider import MultiAgentProvider
+from provider import stream_turn
 
 load_dotenv()
 
@@ -41,9 +41,9 @@ Reply with JSON: {{"correct": true|false, "routing_ok": true|false, "why": "..."
 """
 
 
-async def run_one(provider: MultiAgentProvider, user: str) -> tuple[str, str]:
+async def run_one(user: str) -> tuple[str, str]:
     answer, agent = "", "Supervisor"
-    async for ev in provider.stream_turn(user):
+    async for ev in stream_turn(user):
         if ev["type"] == "delta":
             answer += ev["delta"]
         elif ev["type"] == "agent":
@@ -66,12 +66,11 @@ def judge(client: OpenAI, user: str, expected: str, actual: str, answer: str) ->
 
 
 async def main() -> None:
-    provider = MultiAgentProvider()
     judge_client = OpenAI()
 
     correct = routed = 0
     for user, expected in CASES:
-        answer, actual = await run_one(provider, user)
+        answer, actual = await run_one(user)
         verdict = judge(judge_client, user, expected, actual, answer)
         correct += int(verdict["correct"])
         routed += int(verdict["routing_ok"])

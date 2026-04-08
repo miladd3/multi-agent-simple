@@ -9,10 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 
-from provider import MultiAgentProvider
-
-
-provider = MultiAgentProvider()
+from provider import stream_turn
 
 
 class StreamChatRequest(BaseModel):
@@ -50,7 +47,7 @@ async def stream_chat(payload: StreamChatRequest) -> StreamingResponse:
 
     async def generate() -> AsyncIterator[str]:
         try:
-            async for chunk in provider.stream_turn(message, conversation_id):
+            async for chunk in stream_turn(message, conversation_id):
                 yield json.dumps(chunk) + "\n"
         except Exception as exc:
             yield json.dumps({"type": "error", "error": str(exc)}) + "\n"

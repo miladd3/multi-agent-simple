@@ -12,7 +12,10 @@ from openai.types.responses import ResponseTextDeltaEvent
 from tracing import setup_tracing
 
 setup_tracing()
+load_dotenv()
 
+_model = os.getenv("OPENAI_MODEL", "gpt-4.1")
+_mcp_url = os.getenv("MCP_SERVER_URL", "http://127.0.0.1:2009/mcp")
 
 LIMIT_AGENT_INSTRUCTIONS = """You are a debit card limit management assistant.
 You help users view and change their card limits (POS, ATM, E-commerce).
@@ -20,10 +23,14 @@ You help users view and change their card limits (POS, ATM, E-commerce).
 Steps:
 1. Call `get_payment_instruments` to fetch the user's cards.
 2. Show the user their cards with masked numbers and current limits.
-3. If they want to change a limit, collect: transaction type (pos/atm/ecom), new amount, permanent or temporary. ask it one step at a time.
+3. If they want to change a limit, collect: transaction type (pos/atm/ecom),
+4. then ask for new amount,
+5. then ask if they want permanent or temporary change.
 4. If temporary, collect start_date and end_date (YYYY-MM-DD).
 5. Confirm before executing. Then call `change_limit` or `create_temporary_limit`.
 6. Show the updated limits.
+
+for each question uses can choose eather by number or by name. Always confirm the card they want to manage by showing masked number and current limits.
 
 Always use MCP tool responses as source of truth. Never hardcode values.
 Keep responses concise. Mask card numbers (e.g. ****1234).
@@ -55,76 +62,72 @@ Rules:
 - If the request is about ABN AMRO (history, facts, services, Tikkie, etc.), hand off to the FAQ Agent.
 - Never try to answer domain questions yourself — always delegate.
 - If the user says goodbye, respond with a friendly farewell.
+- no markdown you can use plain text formatting to make the response more engaging, but keep it concise and to the point.
 """
 
 SESSIONS_DB = "sessions.db"
 
 
-class MultiAgentProvider:
-    def __init__(self) -> None:
-        load_dotenv()
-        self.model = os.getenv("OPENAI_MODEL", "gpt-4.1")
-        self.mcp_url = os.getenv("MCP_SERVER_URL", "http://127.0.0.1:2009/mcp")
+def _build_supervisor(mcp_server: MCPServerStreamableHttp) -> Agent[Any]:
+    limit_agent = Agent(
+        name="Limit Agent",
+        handoff_description="Handles viewing, changing, or managing card limits (POS, ATM, E-commerce). Use when the user wants to see their current limits or make changes.",
+        instructions=LIMIT_AGENT_INSTRUCTIONS,
+        model=_model,
+        mcp_servers=[mcp_server],
+    )
+    faq_agent = Agent(
+        name="FAQ Agent",
+        handoff_description="Shares interesting facts and answers questions about ABN AMRO — its history, services, Tikkie, sustainability, and more. Use when the user asks about the bank itself.",
+        instructions=FAQ_AGENT_INSTRUCTIONS,
+        model=_model,
+    )
+    return Agent(
+        name="Supervisor",
+        instructions=SUPERVISOR_INSTRUCTIONS,
+        model=_model,
+        handoffs=[limit_agent, faq_agent],
+    )
 
-    def _build_supervisor(self, mcp_server: MCPServerStreamableHttp) -> Agent[Any]:
-        limit_agent = Agent(
-            name="Limit Agent",
-            handoff_description="Handles viewing, changing, or managing card limits (POS, ATM, E-commerce). Use when the user wants to see their current limits or make changes.",
-            instructions=LIMIT_AGENT_INSTRUCTIONS,
-            model=self.model,
-            mcp_servers=[mcp_server],
-        )
-        faq_agent = Agent(
-            name="FAQ Agent",
-            handoff_description="Shares interesting facts and answers questions about ABN AMRO — its history, services, Tikkie, sustainability, and more. Use when the user asks about the bank itself.",
-            instructions=FAQ_AGENT_INSTRUCTIONS,
-            model=self.model,
-        )
-        return Agent(
-            name="Supervisor",
-            instructions=SUPERVISOR_INSTRUCTIONS,
-            model=self.model,
-            handoffs=[limit_agent, faq_agent],
-        )
 
-    async def stream_turn(
-        self, user_message: str, conversation_id: str | None = None
-    ) -> AsyncIterator[dict[str, Any]]:
-        session_id = conversation_id or f"multi-agent-{uuid4()}"
-        session = SQLiteSession(session_id, SESSIONS_DB)
-        trace_id = gen_trace_id()
+async def stream_turn(
+    user_message: str, conversation_id: str | None = None
+) -> AsyncIterator[dict[str, Any]]:
+    session_id = conversation_id or f"multi-agent-{uuid4()}"
+    session = SQLiteSession(session_id, SESSIONS_DB)
+    trace_id = gen_trace_id()
 
-        async with MCPServerStreamableHttp(
-            name="card_limit_manager",
-            params={"url": self.mcp_url, "timeout": 15, "sse_read_timeout": 300},
-            cache_tools_list=True,
-        ) as mcp_server:
-            supervisor = self._build_supervisor(mcp_server)
+    async with MCPServerStreamableHttp(
+        name="card_limit_manager",
+        params={"url": _mcp_url, "timeout": 15, "sse_read_timeout": 300},
+        cache_tools_list=True,
+    ) as mcp_server:
+        supervisor = _build_supervisor(mcp_server)
 
-            with trace(workflow_name="Multi-Agent Card Limits", trace_id=trace_id):
-                stream_result = Runner.run_streamed(supervisor, user_message, session=session)
-                yield {"type": "conversation", "conversationId": session_id}
+        with trace(workflow_name="Multi-Agent Card Limits", trace_id=trace_id):
+            stream_result = Runner.run_streamed(supervisor, user_message, session=session)
+            yield {"type": "conversation", "conversationId": session_id}
 
-                async for event in stream_result.stream_events():
-                    if event.type == "raw_response_event":
-                        if isinstance(event.data, ResponseTextDeltaEvent):
-                            yield {"type": "delta", "delta": event.data.delta}
-                    elif event.type == "agent_updated_stream_event":
-                        yield {"type": "agent", "agentName": event.new_agent.name}
-                    elif event.type == "run_item_stream_event":
-                        item = event.item
-                        if item.type == "tool_call_item":
-                            yield {"type": "tool_call", "name": getattr(item.raw_item, "name", "tool")}
-                        elif item.type == "tool_call_output_item":
-                            yield {"type": "tool_output", "output": str(item.output)}
-                        elif item.type == "handoff_call_item":
-                            yield {"type": "handoff", "target": getattr(item.raw_item, "name", "specialist")}
-                        elif item.type == "message_output_item":
-                            yield {"type": "message", "text": ItemHelpers.text_message_output(item)}
+            async for event in stream_result.stream_events():
+                if event.type == "raw_response_event":
+                    if isinstance(event.data, ResponseTextDeltaEvent):
+                        yield {"type": "delta", "delta": event.data.delta}
+                elif event.type == "agent_updated_stream_event":
+                    yield {"type": "agent", "agentName": event.new_agent.name}
+                elif event.type == "run_item_stream_event":
+                    item = event.item
+                    if item.type == "tool_call_item":
+                        yield {"type": "tool_call", "name": getattr(item.raw_item, "name", "tool")}
+                    elif item.type == "tool_call_output_item":
+                        yield {"type": "tool_output", "output": str(item.output)}
+                    elif item.type == "handoff_call_item":
+                        yield {"type": "handoff", "target": getattr(item.raw_item, "name", "specialist")}
+                    elif item.type == "message_output_item":
+                        yield {"type": "message", "text": ItemHelpers.text_message_output(item)}
 
-                yield {
-                    "type": "done",
-                    "output": str(stream_result.final_output or "").strip(),
-                    "agentName": stream_result.last_agent.name if stream_result.last_agent else "Supervisor",
-                    "traceId": trace_id,
-                }
+            yield {
+                "type": "done",
+                "output": str(stream_result.final_output or "").strip(),
+                "agentName": stream_result.last_agent.name if stream_result.last_agent else "Supervisor",
+                "traceId": trace_id,
+            }
