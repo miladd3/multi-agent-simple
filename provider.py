@@ -10,6 +10,8 @@ from agents.mcp import MCPServerStreamableHttp
 from dotenv import load_dotenv
 from openai.types.responses import ResponseTextDeltaEvent
 from openinference.instrumentation import using_session
+from openinference.semconv.trace import OpenInferenceSpanKindValues, SpanAttributes
+from opentelemetry import trace as otel_trace
 
 from tracing import setup_tracing
 
@@ -18,6 +20,7 @@ load_dotenv()
 
 _model = os.getenv("OPENAI_MODEL", "gpt-4.1")
 _mcp_url = os.getenv("MCP_SERVER_URL", "http://127.0.0.1:2009/mcp")
+_tracer = otel_trace.get_tracer(__name__)
 
 LIMIT_AGENT_INSTRUCTIONS = """You are a debit card limit management assistant.
 You help users view and change their card limits (POS, ATM, E-commerce).
@@ -159,7 +162,16 @@ async def stream_turn(
 
     selected_agent = _select_agent(agent, _mcp_server)
 
-    with trace(workflow_name="Multi-Agent Card Limits", trace_id=trace_id), using_session(session_id):
+    with _tracer.start_as_current_span(
+        "agent_turn",
+        attributes={
+            SpanAttributes.OPENINFERENCE_SPAN_KIND: OpenInferenceSpanKindValues.AGENT.value,
+            SpanAttributes.SESSION_ID: session_id,
+            SpanAttributes.INPUT_VALUE: user_message,
+        },
+    ) as turn_span, trace(
+        workflow_name="Multi-Agent Card Limits", trace_id=trace_id
+    ), using_session(session_id):
         stream_result = Runner.run_streamed(selected_agent, user_message, session=session)
         yield {"type": "conversation", "conversationId": session_id}
 
@@ -168,9 +180,12 @@ async def stream_turn(
             if translated:
                 yield translated
 
+        final_output = str(stream_result.final_output or "").strip()
+        turn_span.set_attribute(SpanAttributes.OUTPUT_VALUE, final_output)
+
         yield {
             "type": "done",
-            "output": str(stream_result.final_output or "").strip(),
+            "output": final_output,
             "agentName": stream_result.last_agent.name if stream_result.last_agent else "Supervisor",
             "traceId": trace_id,
         }
