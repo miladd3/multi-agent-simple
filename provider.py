@@ -9,6 +9,7 @@ from agents import Agent, ItemHelpers, Runner, SQLiteSession, gen_trace_id, trac
 from agents.mcp import MCPServerStreamableHttp
 from dotenv import load_dotenv
 from openai.types.responses import ResponseTextDeltaEvent
+from openinference.instrumentation import using_session
 
 from tracing import setup_tracing
 
@@ -158,7 +159,7 @@ async def stream_turn(
 
     selected_agent = _select_agent(agent, _mcp_server)
 
-    with trace(workflow_name="Multi-Agent Card Limits", trace_id=trace_id):
+    with trace(workflow_name="Multi-Agent Card Limits", trace_id=trace_id), using_session(session_id):
         stream_result = Runner.run_streamed(selected_agent, user_message, session=session)
         yield {"type": "conversation", "conversationId": session_id}
 
