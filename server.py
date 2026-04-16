@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
 import uvicorn
@@ -9,7 +10,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 
-from provider import stream_turn
+from provider import mcp_lifespan, stream_turn
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    async with mcp_lifespan():
+        yield
 
 
 class StreamChatRequest(BaseModel):
@@ -17,7 +24,7 @@ class StreamChatRequest(BaseModel):
     conversationId: str | None = None
 
 
-app = FastAPI(title="Multi-Agent Chat API", version="0.1.0")
+app = FastAPI(title="Multi-Agent Chat API", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

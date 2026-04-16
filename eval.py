@@ -17,7 +17,7 @@ import os
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from provider import stream_turn
+from provider import mcp_lifespan, stream_turn
 
 load_dotenv()
 
@@ -69,13 +69,14 @@ async def main() -> None:
     judge_client = OpenAI()
 
     correct = routed = 0
-    for user, expected in CASES:
-        answer, actual = await run_one(user)
-        verdict = judge(judge_client, user, expected, actual, answer)
-        correct += int(verdict["correct"])
-        routed += int(verdict["routing_ok"])
-        mark = "OK" if verdict["correct"] and verdict["routing_ok"] else "FAIL"
-        print(f"[{mark}] {user}\n    -> {actual}: {answer[:120]}\n    judge: {verdict['why']}\n")
+    async with mcp_lifespan():
+        for user, expected in CASES:
+            answer, actual = await run_one(user)
+            verdict = judge(judge_client, user, expected, actual, answer)
+            correct += int(verdict["correct"])
+            routed += int(verdict["routing_ok"])
+            mark = "OK" if verdict["correct"] and verdict["routing_ok"] else "FAIL"
+            print(f"[{mark}] {user}\n    -> {actual}: {answer[:120]}\n    judge: {verdict['why']}\n")
 
     n = len(CASES)
     print(f"correctness: {correct}/{n}    routing: {routed}/{n}")
